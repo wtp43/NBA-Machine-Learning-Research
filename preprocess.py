@@ -8,11 +8,12 @@ from datetime import date, datetime
 from tqdm.notebook import tqdm
 import re
 from collections import defaultdict
-
+import time
 
 match_df = None
 pp_df = None
 season_df = None
+injury_df = None
 
 
 match_query = '''SELECT
@@ -119,7 +120,7 @@ match_query = '''SELECT
 					o.match_id = m.match_id
 				GROUP BY m.match_id
 			) AS ou ON m.match_id = ou.match_id
-			WHERE date >= DATE('2013-10-29')
+			WHERE date >= DATE('2007-10-29')
 			ORDER BY date ASC
 			'''
 
@@ -129,7 +130,7 @@ season_query = '''SELECT *
 player_performance_query = '''SELECT p.*, m.date
 							FROM player_performance as p, match as m
 							WHERE m.match_id = p.match_id
-							AND m.date >= DATE('2013-10-29')
+							AND m.date >= DATE('2007-10-29')
 							ORDER BY date ASC'''
 team_query = '''SELECT * 
 				FROM team_name'''
@@ -137,9 +138,8 @@ team_query = '''SELECT *
 injury_query = '''SELECT i.* 
 				FROM injury as i, match as m
 				WHERE m.match_id = i.match_id
-				AND m.date >= DATE('2013-10-29')
+				AND m.date >= DATE('2007-10-29')
 				ORDER BY m.date ASC'''
-
 
 def get_season(date):
     return season_df[(season_df['start_date'] <= date) &
@@ -147,6 +147,7 @@ def get_season(date):
 
 
 def label_seasons():
+	global match_df, pp_df
 	match_df['season'] = match_df['date'].map(get_season)
 	pp_df['season'] = pp_df['date'].map(get_season)
 
@@ -196,6 +197,7 @@ def update_elo(home_elo, away_elo, movl):
 
 
 def label_elo():
+	global match_df
 	match_df['home_elo'] = 1500.0
 	match_df['away_elo'] = 1500.0
 	for idx, row in tqdm(match_df.iterrows(), total=match_df.shape[0]):
@@ -215,6 +217,7 @@ def label_elo():
 		match_df.at[idx, 'prev_away_elo'] = prev_a_elo
 
 def db_to_df():
+	global match_df, season_df, pp_df, injury_df
 	conn = db_func.get_conn()
 	#insert data from db to df
 	match_df = pd.read_sql(match_query, conn)
@@ -229,6 +232,7 @@ def db_to_df():
 	conn.close()
 
 def label_movl():
+	global match_df
 	#Add Margin of victory/loss(MOVL) and whether home team won or not
 	match_df['movl'] = match_df['home_pts'] - match_df['away_pts']
 	match_df['h_win'] = match_df['movl'].map(lambda x: 0 if x < 0 else 1)
@@ -281,6 +285,7 @@ def get_past_per_sum(team_id, prev_matches, i):
 def get_prev_player_match(date, player_id, pp_df):
     return pp_df[(pp_df['date'] < date) & 
                 (pp_df['player_id'] == player_id)].tail(1)
+
 def get_active_players(match_id, team_id, pp_df):
     return  pp_df[(pp_df['match_id'] == match_id) &
                       (pp_df['team_id'] == team_id) &
@@ -291,6 +296,8 @@ def get_complete_roster(match_id, team_id, match_df):
                       (pp_df['team_id'] == team_id)]
 
 def label_per():
+	global match_df, season_df, pp_df, injury_df
+
 	pp_df['per'] = pp_df.apply(player_match_eff_rating, axis=1)
 
 	match_df['away_per'] = match_df.apply(lambda x: team_match_eff_rating(
@@ -335,6 +342,7 @@ def df_to_db():
 	df.to_sql("table_name4", engine, if_exists='replace')
 
 def label_team_stats():
+	global match_df, season_df, pp_df, injury_df
 	d = defaultdict(list)
 	for idx, row in tqdm(match_df.iterrows(), total=match_df.shape[0]):
 		home_players = get_active_players(row['match_id'], row['home_id'], pp_df)
@@ -421,10 +429,11 @@ def get_prev_team_sum(team_id, home_col, prev_matches):
 
 
 def label_sma_ema():
+	global match_df, season_df, pp_df, injury_df
 	smoothing = 2
 
 	window_sizes = [3]
-	hth_window_sizes = [1,2]
+	hth_window_sizes = [2]
 
 	for w in tqdm(range(len(hth_window_sizes))):
 		hth_window_size = hth_window_sizes[w]
@@ -500,7 +509,7 @@ def label_sma_ema():
 		window_size = window_sizes[w]
 
 		ema_h_features = [(f'prev_home_pts_ema{window_size}',       f'post_home_pts_ema{window_size}'),
-						(f'prev_home_bpm_ema{window_size}',       f'post_home_bpm_ema{window_size}'),
+		                (f'prev_home_bpm_ema{window_size}',       f'post_home_bpm_ema{window_size}'),
 						(f'prev_home_fg_ema{window_size}',        f'post_home_fg_ema{window_size}'),
 						(f'prev_home_fg_pct_ema{window_size}',    f'post_home_fg_pct_ema{window_size}'),
 						(f'prev_home_3p_ema{window_size}',        f'post_home_3p_ema{window_size}'),
@@ -588,6 +597,7 @@ def get_past_wins_as_favorite(team_id, prev_matches, i):
     return prev_matches['res'].sum()/i    
 
 def label_consistency():
+	global match_df
 	# favorite = 1: home team is favorite.
 	# favorite = 0: away team is favorite
 	match_df['favorite'] = match_df['home_ml'] < match_df['away_ml']
@@ -611,14 +621,18 @@ def label_consistency():
 															).tail(w),
 														w), axis=1)
 
+#how to score an injury?
+#play time, points scored
+
 def df_to_csv():
-	season_df.to_csv('seasons.csv', header=True, index=False)
-	match_df.to_csv('matches.csv', header=True, index=False)
-	pp_df.to_csv('playerperformances.csv', header=True, index=False)
-	injury_df.to_csv('injuries.csv', header=True, index=False)
+	season_df.to_csv('all_seasons.csv', header=True, index=False)
+	match_df.to_csv('all_matches.csv', header=True, index=False)
+	pp_df.to_csv('all_playerperformances.csv', header=True, index=False)
+	injury_df.to_csv('all_injuries.csv', header=True, index=False)
 
 
 def main():
+	start = time.time()
 	#Fill dataframes
 	db_to_df()
 
@@ -629,9 +643,11 @@ def main():
 	#Filter rows based on when 3 point era
 	label_movl()
 
-	#Player EFficiency Rating over a sum of the last 3 games
+	#Player Efficiency Rating over a sum of the last 3 games
 	label_per()
 
+	#List of team stats
+	label_team_stats()	
 
 	#SMA and EMA stats
 	label_sma_ema()
@@ -640,10 +656,11 @@ def main():
 	label_consistency()
 
 	#Team Elo Rating
-	label_elo()
+	#label_elo()
 
 	#Save df to csv
 	df_to_csv()
-
+	end = time.time()
+	print(end - start)
 if __name__ == '__main__':
 	main()
