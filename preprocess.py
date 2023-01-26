@@ -1,20 +1,25 @@
-import math
 import db_func
 import pandas as pd
-import numpy as np
-from bokeh.plotting import figure, show
-import matplotlib.pyplot as plt
-from datetime import date, datetime
+from datetime import datetime
 from tqdm.notebook import tqdm
 import re
 from collections import defaultdict
 import time
+from sqlalchemy import create_engine
+from dotenv import load_dotenv
+from pathlib import Path
+import os
 
 match_df = None
 pp_df = None
 season_df = None
 injury_df = None
 
+
+basepath = Path()
+# Load the environment variables
+envars = basepath.cwd().parent.joinpath('NBA_ML/db.env')
+load_dotenv(envars)
 
 match_query = '''SELECT
 				m.match_id,  m.away_id, m.home_id,
@@ -30,7 +35,7 @@ match_query = '''SELECT
 					AVG(decimal_odds) AS home_ml,
 					m.match_id AS match_id
 				FROM
-					odds AS o, team AS t1, team as t2,
+					opening_odds AS o, team AS t1, team as t2,
 					match AS m
 				WHERE
 					o.bet_type_id = 1 AND
@@ -44,7 +49,7 @@ match_query = '''SELECT
 					AVG(decimal_odds) AS away_ml,
 					m.match_id AS match_id
 				FROM
-					odds AS o, team AS t1, team as t2,
+					opening_odds AS o, team AS t1, team as t2,
 					match AS m
 				WHERE
 					o.bet_type_id = 1 AND
@@ -59,7 +64,7 @@ match_query = '''SELECT
 					AVG(spread) AS home_spread,
 					m.match_id AS match_id
 				FROM
-					odds AS o, team AS t1, team as t2,
+					opening_odds AS o, team AS t1, team as t2,
 					match AS m
 				WHERE
 					o.bet_type_id = 2 AND
@@ -74,7 +79,7 @@ match_query = '''SELECT
 					AVG(spread) AS away_spread,
 					m.match_id AS match_id
 				FROM
-					odds AS o, team AS t1, team as t2,
+					opening_odds AS o, team AS t1, team as t2,
 					match AS m
 				WHERE
 					o.bet_type_id = 2 AND
@@ -88,7 +93,7 @@ match_query = '''SELECT
 					AVG(decimal_odds) AS under,
 					m.match_id AS match_id
 				FROM
-					odds AS o, match AS m
+					opening_odds AS o, match AS m
 				WHERE
 					o.bet_type_id = 3 AND
 					o.over_under = 'under' AND
@@ -101,7 +106,7 @@ match_query = '''SELECT
 					AVG(decimal_odds) AS over,
 					m.match_id AS match_id
 				FROM
-					odds AS o, match AS m
+					opening_odds AS o, match AS m
 				WHERE
 					o.bet_type_id = 3 AND
 					o.over_under = 'over' AND
@@ -114,13 +119,13 @@ match_query = '''SELECT
 					AVG(spread) AS spread,
 					m.match_id AS match_id
 				FROM
-					odds AS o, match AS m
+					opening_odds AS o, match AS m
 				WHERE
 					o.bet_type_id = 3 AND
 					o.match_id = m.match_id
 				GROUP BY m.match_id
 			) AS ou ON m.match_id = ou.match_id
-			WHERE date >= DATE('2007-10-29')
+			WHERE date >= DATE('2013-10-29')
 			ORDER BY date ASC
 			'''
 
@@ -130,7 +135,7 @@ season_query = '''SELECT *
 player_performance_query = '''SELECT p.*, m.date
 							FROM player_performance as p, match as m
 							WHERE m.match_id = p.match_id
-							AND m.date >= DATE('2007-10-29')
+							AND m.date >= DATE('2013-10-29')
 							ORDER BY date ASC'''
 team_query = '''SELECT * 
 				FROM team_name'''
@@ -138,7 +143,7 @@ team_query = '''SELECT *
 injury_query = '''SELECT i.* 
 				FROM injury as i, match as m
 				WHERE m.match_id = i.match_id
-				AND m.date >= DATE('2007-10-29')
+				AND m.date >= DATE('2013-10-29')
 				ORDER BY m.date ASC'''
 
 def get_season(date):
@@ -347,58 +352,63 @@ def label_team_stats():
 	for idx, row in tqdm(match_df.iterrows(), total=match_df.shape[0]):
 		home_players = get_active_players(row['match_id'], row['home_id'], pp_df)
 		away_players = get_active_players(row['match_id'], row['away_id'], pp_df)
-		d['home_bpm'].append(home_players['bpm'].sum())
-		d['away_bpm'].append(away_players['bpm'].sum())
 		
-		d['home_fg'].append(home_players['fg'].sum())
-		d['away_fg'].append(away_players['fg'].sum())
+		rate_denom = home_players['sp'].sum()/(5 * 60 * 12)
+		
+		d['match_length'].append(home_players['sp'].sum()/(5 * 60))
+
+		d['home_bpm'].append(home_players['bpm'].sum()/rate_denom)
+		d['away_bpm'].append(away_players['bpm'].sum()/rate_denom)
+		
+		d['home_fg'].append(home_players['fg'].sum()/rate_denom)
+		d['away_fg'].append(away_players['fg'].sum()/rate_denom)
 		d['home_fg_pct'].append(home_players['fg_pct'].mean())
 		d['away_fg_pct'].append(away_players['fg_pct'].mean())
 		
-		d['home_3p'].append(home_players['threep'].sum())
-		d['away_3p'].append(away_players['threep'].sum())
-		d['home_3pa'].append(home_players['threepa'].sum())
-		d['away_3pa'].append(away_players['threepa'].sum())
+		d['home_3p'].append(home_players['threep'].sum()/rate_denom)
+		d['away_3p'].append(away_players['threep'].sum()/rate_denom)
+		d['home_3pa'].append(home_players['threepa'].sum()/rate_denom)
+		d['away_3pa'].append(away_players['threepa'].sum()/rate_denom)
 		d['home_3p_pct'].append(home_players['threep_pct'].mean())
 		d['away_3p_pct'].append(away_players['threep_pct'].mean())
 		
-		d['home_ft'].append(home_players['ft'].sum())
-		d['away_ft'].append(away_players['ft'].sum())
+		d['home_ft'].append(home_players['ft'].sum()/rate_denom)
+		d['away_ft'].append(away_players['ft'].sum()/rate_denom)
 		d['home_ft_pct'].append(home_players['ft_pct'].mean())
 		d['away_ft_pct'].append(away_players['ft_pct'].mean())
 		
-		d['home_orb'].append(home_players['orb'].sum())
-		d['away_orb'].append(away_players['orb'].sum())
+		d['home_orb'].append(home_players['orb'].sum()/rate_denom)
+		d['away_orb'].append(away_players['orb'].sum()/rate_denom)
 		d['home_orb_pct'].append(home_players['orb_pct'].mean())
 		d['away_orb_pct'].append(away_players['orb_pct'].mean())
 		
-		d['home_drb'].append(home_players['drb'].sum())
-		d['away_drb'].append(away_players['drb'].sum())
+		d['home_drb'].append(home_players['drb'].sum()/rate_denom)
+		d['away_drb'].append(away_players['drb'].sum()/rate_denom)
 		d['home_drb_pct'].append(home_players['drb_pct'].mean())
 		d['away_drb_pct'].append(away_players['drb_pct'].mean())
 		
-		d['home_trb'].append(home_players['trb'].sum())
-		d['away_trb'].append(away_players['trb'].sum())
+		d['home_trb'].append(home_players['trb'].sum()/rate_denom)
+		d['away_trb'].append(away_players['trb'].sum()/rate_denom)
 		d['home_trb_pct'].append(home_players['trb_pct'].mean())
 		d['away_trb_pct'].append(away_players['trb_pct'].mean())
 		
-		d['home_tov'].append(home_players['tov'].sum())
-		d['away_tov'].append(away_players['tov'].sum())
+		d['home_tov'].append(home_players['tov'].sum()/rate_denom)
+		d['away_tov'].append(away_players['tov'].sum()/rate_denom)
 		d['home_tov_pct'].append(home_players['tov_pct'].mean())
 		d['away_tov_pct'].append(away_players['tov_pct'].mean())
 		
-		d['home_ast'].append(home_players['ast'].sum())
-		d['away_ast'].append(away_players['ast'].sum())
+		d['home_ast'].append(home_players['ast'].sum()/rate_denom)
+		d['away_ast'].append(away_players['ast'].sum()/rate_denom)
 		d['home_ast_pct'].append(home_players['ast_pct'].mean())
 		d['away_ast_pct'].append(away_players['ast_pct'].mean())
 		
-		d['home_stl'].append(home_players['stl'].sum())
-		d['away_stl'].append(away_players['stl'].sum())
+		d['home_stl'].append(home_players['stl'].sum()/rate_denom)
+		d['away_stl'].append(away_players['stl'].sum()/rate_denom)
 		d['home_stl_pct'].append(home_players['stl_pct'].mean())
 		d['away_stl_pct'].append(away_players['stl_pct'].mean())
 		
-		d['home_blk'].append(home_players['blk'].sum())
-		d['away_blk'].append(away_players['blk'].sum())
+		d['home_blk'].append(home_players['blk'].sum()/rate_denom)
+		d['away_blk'].append(away_players['blk'].sum()/rate_denom)
 		d['home_blk_pct'].append(home_players['blk_pct'].mean())
 		d['away_blk_pct'].append(away_players['blk_pct'].mean())
 		
@@ -411,7 +421,6 @@ def label_team_stats():
 		d['home_efg_pct'].append(home_players['efg_pct'].mean())
 		d['away_efg_pct'].append(away_players['efg_pct'].mean())
 		
-		d['sp'].append(home_players['sp'].sum())
 	df = pd.DataFrame(d)
 	match_df = pd.concat([match_df.reset_index(drop=True),
 						df.reset_index(drop=True)],axis=1)
@@ -603,7 +612,7 @@ def label_consistency():
 	match_df['favorite'] = match_df['home_ml'] < match_df['away_ml']
 	match_df['favorite_won'] = match_df.apply(lambda x: (x['favorite'] and x['h_win'] == 1) or
 											(not x['favorite'] and x['h_win'] == 0), axis=1)
-	window_sizes = [2,3,4,5,6,7,8,9,10]
+	window_sizes = [3]
 
 	for w in tqdm(window_sizes):
 		match_df[f'past_{w}_home_favorite_wins'] = match_df.apply(lambda x: 
@@ -620,25 +629,49 @@ def label_consistency():
 															match_df
 															).tail(w),
 														w), axis=1)
-
-#how to score an injury?
-#play time, points scored
+#TODO: Feature engineering
+#-How to score an injury
+#-Player elo
+#-Player fatigue (time played in last 3 games)
+#-Last injury for player
+#-Importance of player based on time played
 
 def df_to_csv():
-	season_df.to_csv('all_seasons.csv', header=True, index=False)
-	match_df.to_csv('all_matches.csv', header=True, index=False)
-	pp_df.to_csv('all_playerperformances.csv', header=True, index=False)
-	injury_df.to_csv('all_injuries.csv', header=True, index=False)
+	season_df.to_csv('modern_seasons.csv', header=True, index=False)
+	match_df.to_csv('modern_matches.csv', header=True, index=False)
+	pp_df.to_csv('modern_playerperformances.csv', header=True, index=False)
+	injury_df.to_csv('modern_injuries.csv', header=True, index=False)
+
+def keep_modern_era_basketball_matches():
+	global match_df
+	match_df = match_df[match_df['season']>=2014]
+
+def csv_to_table():
+	url="postgresql://{0}:{1}@{2}:{3}/{4}".format(
+            os.getenv('DBUSER'), 
+			os.getenv('PASSWORD'), 
+			os.getenv('HOST'), 
+			os.getenv('PORT'), 
+			os.getenv('DATABASE'))
+	engine = create_engine(url)
+	df = pd.read_csv('3p_era_matches_with_opening_odds.csv')
+	df.to_sql("model_data", engine)
+
+def label_home_win():
+	global match_df
+	match_df['home_win'] = match_df['movl'].map(lambda x: 0 if x < 0 else 1)
 
 
 def main():
+	#opt = input('1. Process data\n  2. Copy csv to database \n')
 	start = time.time()
+	# match opt:
+	# 	case '1':
 	#Fill dataframes
 	db_to_df()
 
 	#Define seasons
 	label_seasons()
-
 
 	#Filter rows based on when 3 point era
 	label_movl()
@@ -654,13 +687,21 @@ def main():
 
 	#Team Consistency
 	label_consistency()
-
+	
+	#Label home win used for classification
+	label_home_win()
 	#Team Elo Rating
-	#label_elo()
+	label_elo()
 
 	#Save df to csv
 	df_to_csv()
+		# case '2':
+		# 	csv_to_table()
+		# case _:
+		# 	return 0
+
 	end = time.time()
 	print(end - start)
+	
 if __name__ == '__main__':
 	main()
